@@ -312,11 +312,17 @@ class DamaiTicketBot:
             logger.info(f"[驱动] 使用环境变量指定的chromedriver: {env_path}")
             return env_path
 
-        # 2. 本地缓存（./drivers/chromedriver）
+        # 2. 本地缓存（./drivers/chromedriver）—— 用前验证可执行，防止复用架构不符/损坏的旧文件
         cache_path = os.path.join("drivers", exe)
         if os.path.exists(cache_path):
-            logger.info(f"[驱动] 使用本地缓存: {cache_path}")
-            return os.path.abspath(cache_path)
+            if self._is_valid_driver(cache_path):
+                logger.info(f"[驱动] 使用本地缓存: {cache_path}")
+                return os.path.abspath(cache_path)
+            logger.warning("[驱动] 缓存的驱动无法执行（架构不匹配或已损坏），删除并重新下载")
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
 
         # 3. 国内镜像下载（npmmirror镜像chrome-for-testing，实测国内30MB/s+）
         try:
@@ -339,7 +345,7 @@ class DamaiTicketBot:
                     ver = matched[-1]
                     plat = {
                         "Windows": "win64" if platform.machine().endswith("64") else "win32",
-                        "Darwin": "mac-arm64" if platform.machine() == "arm64" else "mac-x64",
+                        "Darwin": "mac-arm64" if self._is_apple_silicon() else "mac-x64",
                         "Linux": "linux64",
                     }[platform.system()]
                     url = (f"https://cdn.npmmirror.com/binaries/chrome-for-testing/"
@@ -360,8 +366,13 @@ class DamaiTicketBot:
                             shutil.copyfileobj(src, dst)
                     os.unlink(tmp_path)
                     os.chmod(cache_path, 0o755)
-                    logger.info(f"[驱动] 已下载到本地缓存: {os.path.abspath(cache_path)}（下次秒启）")
-                    return os.path.abspath(cache_path)
+                    # 下载后立即验证可执行，防止缓存架构不符的文件
+                    if not self._is_valid_driver(cache_path):
+                        logger.warning("[驱动] 下载的文件无法执行（架构不匹配），已删除")
+                        os.remove(cache_path)
+                    else:
+                        logger.info(f"[驱动] 已下载到本地缓存: {os.path.abspath(cache_path)}（下次秒启）")
+                        return os.path.abspath(cache_path)
         except Exception as e:
             logger.warning(f"[驱动] 国内镜像下载失败: {e}")
 
@@ -381,6 +392,37 @@ class DamaiTicketBot:
         """webdriver-manager下载（供线程限时调用）"""
         from webdriver_manager.chrome import ChromeDriverManager
         return ChromeDriverManager().install()
+
+    @staticmethod
+    def _is_valid_driver(path) -> bool:
+        """验证chromedriver可执行（架构匹配且未损坏），防止缓存坏文件"""
+        import subprocess
+        try:
+            r = subprocess.run([path, "--version"], capture_output=True, timeout=10)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_apple_silicon() -> bool:
+        """
+        检测macOS是否为Apple Silicon（M系列芯片）
+        注意：不能直接用platform.machine()——x86_64版Python跑在Rosetta下时
+        会谎报x86_64，导致下载错误架构的chromedriver（用户实测踩坑）
+        """
+        import platform
+        import subprocess
+        if platform.system() != "Darwin":
+            return False
+        if platform.machine() == "arm64":
+            return True
+        # machine报x86_64时，用sysctl查真实硬件是否支持arm64（绕过Rosetta谎报）
+        try:
+            out = subprocess.run(["sysctl", "-n", "hw.optional.arm64"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+            return out == "1"
+        except Exception:
+            return False
 
     @staticmethod
     def _detect_chrome_version():
