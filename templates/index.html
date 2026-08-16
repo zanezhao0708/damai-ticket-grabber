@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>大麦网抢票工具 Web版</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --card: rgba(255,255,255,0.045);
+    --border: rgba(255,255,255,0.1);
+    --accent: #ff6b35;
+    --accent2: #ff9f1c;
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --yellow: #f1c40f;
+    --text: #e8ecf4;
+    --muted: #8b93a7;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif;
+    background: radial-gradient(1200px 600px at 20% -10%, rgba(255,107,53,.14), transparent 60%),
+                radial-gradient(900px 500px at 90% 110%, rgba(255,159,28,.10), transparent 55%),
+                var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px 20px 40px;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+
+  /* 头部 */
+  header { display:flex; align-items:center; gap:14px; margin-bottom:20px; flex-wrap:wrap; }
+  .logo {
+    width:44px; height:44px; border-radius:12px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display:flex; align-items:center; justify-content:center;
+    font-size:22px; box-shadow: 0 4px 20px rgba(255,107,53,.35);
+  }
+  h1 { font-size:20px; font-weight:700; }
+  .sub { font-size:12px; color:var(--muted); margin-top:2px; }
+  .badge {
+    margin-left:auto; font-size:11px; padding:5px 10px; border-radius:999px;
+    border:1px solid rgba(241,196,15,.4); color:var(--yellow);
+    background: rgba(241,196,15,.08);
+  }
+
+  /* 状态指示 */
+  .status-pill {
+    display:inline-flex; align-items:center; gap:8px;
+    padding:7px 14px; border-radius:999px; font-size:13px; font-weight:600;
+    border:1px solid var(--border); background: var(--card);
+  }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .dot.run { background:var(--green); animation:pulse 1.2s infinite; }
+  .dot.login { background:var(--yellow); animation:pulse 1.2s infinite; }
+  .dot.success { background:var(--accent); animation:pulse .8s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.85)} }
+
+  /* 卡片布局 */
+  .grid { display:grid; grid-template-columns: 1.25fr .9fr; gap:16px; margin-bottom:16px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--card); border:1px solid var(--border);
+    border-radius:16px; padding:20px; backdrop-filter: blur(10px);
+  }
+  .card h2 { font-size:15px; margin-bottom:16px; display:flex; align-items:center; gap:8px; }
+  .card h2 .ico { opacity:.8; }
+
+  /* 表单 */
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 14px; }
+  .field.full { grid-column: 1 / -1; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; }
+  label b { color:var(--accent2); font-weight:600; }
+  input[type=text], input[type=number] {
+    width:100%; padding:9px 12px; border-radius:9px; font-size:13px;
+    border:1px solid var(--border); background:rgba(0,0,0,.25); color:var(--text);
+    transition: border .15s, box-shadow .15s;
+  }
+  input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px rgba(255,107,53,.15); }
+  .hint { grid-column:1/-1; font-size:11px; color:var(--muted); line-height:1.6;
+          background:rgba(255,255,255,.03); padding:8px 10px; border-radius:8px; }
+  .hint code { color:var(--accent2); background:rgba(255,159,28,.1); padding:1px 5px; border-radius:4px; font-size:10px; }
+
+  .checks { display:flex; gap:18px; flex-wrap:wrap; margin-top:4px; }
+  .check { display:flex; align-items:center; gap:7px; font-size:13px; cursor:pointer; user-select:none; }
+  .check input { accent-color: var(--accent); width:15px; height:15px; cursor:pointer; }
+
+  /* 按钮 */
+  .btns { display:flex; flex-direction:column; gap:10px; }
+  button {
+    padding:13px; border:none; border-radius:11px; font-size:15px; font-weight:700;
+    cursor:pointer; transition: transform .08s, opacity .15s, box-shadow .15s;
+    font-family:inherit;
+  }
+  button:active { transform: scale(.98); }
+  button:disabled { opacity:.35; cursor:not-allowed; }
+  .btn-start { background:linear-gradient(135deg, var(--accent), var(--accent2)); color:#fff;
+               box-shadow:0 4px 18px rgba(255,107,53,.35); }
+  .btn-start:not(:disabled):hover { box-shadow:0 6px 24px rgba(255,107,53,.5); }
+  .btn-stop { background:rgba(231,76,60,.14); color:var(--red); border:1px solid rgba(231,76,60,.4); }
+  .btn-login { background:rgba(241,196,15,.12); color:var(--yellow); border:1px solid rgba(241,196,15,.4);
+               animation: none; }
+  .btn-login.urgent { animation: glow 1.2s infinite; }
+  @keyframes glow { 0%,100%{box-shadow:0 0 0 0 rgba(241,196,15,.0)} 50%{box-shadow:0 0 0 6px rgba(241,196,15,.18)} }
+  .btn-ghost { background:transparent; color:var(--muted); border:1px solid var(--border); font-weight:500; font-size:13px; padding:9px; }
+
+  .steps { margin-top:14px; font-size:12px; color:var(--muted); line-height:1.9; }
+  .steps ol { padding-left:18px; }
+  .steps b { color:var(--text); }
+
+  /* 日志终端 */
+  .log-card { padding:0; overflow:hidden; }
+  .log-head { display:flex; align-items:center; padding:12px 16px; border-bottom:1px solid var(--border); gap:10px; }
+  .log-head h2 { margin:0; font-size:14px; }
+  .traffic { display:flex; gap:6px; margin-right:4px; }
+  .traffic i { width:10px; height:10px; border-radius:50%; display:block; }
+  .log-head .spacer { margin-left:auto; display:flex; gap:8px; }
+  #logBox {
+    height: 320px; overflow-y:auto; padding:14px 16px;
+    font-family: "SF Mono", Consolas, "Courier New", monospace; font-size:12px; line-height:1.75;
+    background: rgba(0,0,0,.35);
+  }
+  #logBox .t { color:#5b6478; margin-right:8px; }
+  #logBox .lv-INFO { color:#aeb8cc; }
+  #logBox .lv-WARNING { color:var(--yellow); }
+  #logBox .lv-ERROR, #logBox .lv-CRITICAL { color:var(--red); }
+  #logBox .lv-SUCCESS { color:var(--green); font-weight:700; }
+  #logBox::-webkit-scrollbar { width:8px; }
+  #logBox::-webkit-scrollbar-thumb { background:rgba(255,255,255,.12); border-radius:4px; }
+
+  .empty { color:#5b6478; font-style:italic; }
+
+  footer { text-align:center; margin-top:18px; font-size:11px; color:#5b6478; line-height:1.8; }
+
+  /* 成功横幅 */
+  .banner {
+    display:none; margin-bottom:16px; padding:14px 18px; border-radius:12px;
+    background:linear-gradient(135deg, rgba(46,204,113,.18), rgba(255,159,28,.12));
+    border:1px solid rgba(46,204,113,.45); font-size:14px; font-weight:700;
+    animation: glow2 1s infinite;
+  }
+  @keyframes glow2 { 0%,100%{box-shadow:0 0 0 0 rgba(46,204,113,0)} 50%{box-shadow:0 0 18px rgba(46,204,113,.25)} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">🎟️</div>
+    <div>
+      <h1>大麦网抢票工具 · Web版</h1>
+      <div class="sub">开售前预热 + 开售瞬间JS秒点 · 仅个人学习用途</div>
+    </div>
+    <span class="badge">非盈利 · 仅供研究</span>
+  </header>
+
+  <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; align-items:center;">
+    <span class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">就绪</span></span>
+    <span class="status-pill" style="font-weight:400;color:var(--muted)">⚡ 极速模式建议提前 2 分钟启动</span>
+  </div>
+
+  <div class="banner" id="successBanner">🎉🎉🎉 已进入付款界面！请立即在弹出的浏览器窗口中完成支付！</div>
+
+  <div class="grid">
+    <!-- 左：配置 -->
+    <div class="card">
+      <h2><span class="ico">⚙️</span>抢票参数</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label>演出ID <b>*</b></label>
+          <input type="text" id="item_id" placeholder="1068684284719">
+        </div>
+        <div class="field">
+          <label>场次关键词（模糊）</label>
+          <input type="text" id="session_keyword" placeholder="13:30 / 周六">
+        </div>
+        <div class="field">
+          <label>票档关键词 <b>*</b></label>
+          <input type="text" id="ticket_keyword" placeholder="88元 / 前区互动">
+        </div>
+        <div class="field">
+          <label>数量（1-6）</label>
+          <input type="number" id="quantity" value="1" min="1" max="6">
+        </div>
+        <div class="field full">
+          <label>开售时间（留空 = 立即开始）</label>
+          <input type="text" id="start_time" placeholder="2026-08-20 12:00:00">
+        </div>
+        <div class="field">
+          <label>最大重试</label>
+          <input type="number" id="max_retry" value="50" min="1" max="999">
+        </div>
+        <div class="field">
+          <label>重试间隔（秒）</label>
+          <input type="text" id="request_interval" value="0.5">
+        </div>
+        <div class="field full">
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="fast_mode" checked> ⚡ 极速模式（预热+秒点）</label>
+            <label class="check"><input type="checkbox" id="headless"> 无头模式（隐藏浏览器）</label>
+          </div>
+        </div>
+        <div class="hint">
+          💡 演出ID在详情页地址栏 <code>item.htm?id=</code> 后面；关键词支持模糊匹配；实名演出请提前在大麦账号里添加好观演人。
+        </div>
+      </div>
+    </div>
+
+    <!-- 右：控制 -->
+    <div class="card">
+      <h2><span class="ico">🎮</span>控制台</h2>
+      <div class="btns">
+        <button class="btn-start" id="btnStart">▶ 开始抢票</button>
+        <button class="btn-stop" id="btnStop" disabled>■ 停止</button>
+        <button class="btn-login" id="btnLogin" disabled>✓ 我已登录完成</button>
+      </div>
+      <div class="steps">
+        <ol>
+          <li>填好参数，点 <b>开始抢票</b></li>
+          <li>弹出浏览器 → 手动扫码/验证码登录</li>
+          <li>回到本页点 <b>我已登录完成</b></li>
+          <li>开售瞬间自动秒点进入付款页 → <b>手动支付</b></li>
+        </ol>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日志 -->
+  <div class="card log-card">
+    <div class="log-head">
+      <div class="traffic"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+      <h2>运行日志</h2>
+      <div class="spacer">
+        <button class="btn-ghost" id="btnClear">清空</button>
+      </div>
+    </div>
+    <div id="logBox"><div class="empty">等待启动… 点击「开始抢票」后这里会显示实时日志</div></div>
+  </div>
+
+  <footer>
+    仅限个人学习研究使用，不用于任何盈利活动 · 使用自动化工具可能违反大麦网《用户服务协议》，风险自担<br>
+    damai-ticket-grabber Web · 配置自动保存在浏览器本地
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastLogId = 0;
+let polling = null;
+
+// ---------- 配置本地持久化 ----------
+const FIELDS = ['item_id','session_keyword','ticket_keyword','quantity','start_time','max_retry','request_interval','fast_mode','headless'];
+
+function saveConfig() {
+  const cfg = {};
+  FIELDS.forEach(f => {
+    const el = $(f);
+    cfg[f] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+  localStorage.setItem('damai_config', JSON.stringify(cfg));
+}
+
+function loadConfig() {
+  try {
+    const cfg = JSON.parse(localStorage.getItem('damai_config') || '{}');
+    FIELDS.forEach(f => {
+      if (cfg[f] === undefined) return;
+      const el = $(f);
+      if (el.type === 'checkbox') el.checked = cfg[f];
+      else el.value = cfg[f];
+    });
+  } catch(e) {}
+}
+FIELDS.forEach(f => {
+  const el = $(f);
+  el.addEventListener('change', saveConfig);
+  if (el.type === 'text' || el.type === 'number') el.addEventListener('input', saveConfig);
+});
+loadConfig();
+
+// ---------- 状态与UI刷新 ----------
+function setUI(running, waitingLogin, success) {
+  $('btnStart').disabled = running;
+  $('btnStop').disabled = !running;
+  $('btnLogin').disabled = !waitingLogin;
+  $('btnLogin').classList.toggle('urgent', waitingLogin);
+
+  const dot = $('statusDot'), txt = $('statusText');
+  dot.className = 'dot';
+  if (success) { dot.classList.add('success'); txt.textContent = '已进入付款页，请支付！'; txt.style.color = 'var(--accent2)'; }
+  else if (waitingLogin) { dot.classList.add('login'); txt.textContent = '等待手动登录…'; txt.style.color = 'var(--yellow)'; }
+  else if (running) { dot.classList.add('run'); txt.textContent = '运行中…'; txt.style.color = 'var(--green)'; }
+  else { txt.textContent = '就绪'; txt.style.color = 'var(--muted)'; }
+
+  $('successBanner').style.display = success ? 'block' : 'none';
+}
+
+// ---------- 日志轮询 ----------
+async function pollLogs() {
+  try {
+    const res = await fetch(`/api/logs?after=${lastLogId}`);
+    const data = await res.json();
+    if (data.logs && data.logs.length) {
+      const box = $('logBox');
+      const empty = box.querySelector('.empty');
+      if (empty) empty.remove();
+      data.logs.forEach(l => {
+        lastLogId = Math.max(lastLogId, l.id);
+        const div = document.createElement('div');
+        const lv = l.level === 'SUCCESS' ? 'SUCCESS' : l.level;
+        div.innerHTML = `<span class="t">${l.time}</span><span class="lv-${lv}">${escapeHtml(l.msg)}</span>`;
+        box.appendChild(div);
+      });
+      box.scrollTop = box.scrollHeight;
+    }
+    setUI(data.running, data.waiting_login, data.success);
+  } catch(e) { /* 服务端未启动或网络波动，静默 */ }
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ---------- 按钮事件 ----------
+$('btnStart').addEventListener('click', async () => {
+  const cfg = {};
+  FIELDS.forEach(f => {
+    const el = $(f);
+    cfg[f] = el.type === 'checkbox' ? el.checked : el.value.trim();
+  });
+  if (!cfg.item_id) { alert('请填写演出ID'); return; }
+  if (!cfg.ticket_keyword) { alert('请填写票档关键词'); return; }
+
+  const res = await fetch('/api/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(cfg)
+  });
+  const data = await res.json();
+  if (!data.ok) { alert(data.error || '启动失败'); return; }
+  saveConfig();
+  setUI(true, false, false);
+});
+
+$('btnStop').addEventListener('click', async () => {
+  await fetch('/api/stop', {method: 'POST'});
+});
+
+$('btnLogin').addEventListener('click', async () => {
+  await fetch('/api/login_done', {method: 'POST'});
+  $('btnLogin').disabled = true;
+});
+
+$('btnClear').addEventListener('click', async () => {
+  await fetch('/api/clear_logs', {method: 'POST'});
+  $('logBox').innerHTML = '<div class="empty">日志已清空</div>';
+  lastLogId = 0;
+});
+
+// 启动轮询（1秒一次，日志延迟可接受）
+polling = setInterval(pollLogs, 1000);
+pollLogs();
+</script>
+</body>
+</html>

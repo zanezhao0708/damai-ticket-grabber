@@ -868,7 +868,7 @@ class DamaiTicketBot:
                 # 极速等待开售并点击
                 result = self._fast_wait_and_buy()
                 if result is True:
-                    logger.info("\\n🎉 极速抢票成功！已进入付款界面，请尽快完成支付。")
+                    logger.info("🎉 极速抢票成功！已进入付款界面，请尽快完成支付。")
                 elif result is None:
                     logger.info("已到达订单相关页面，请在浏览器中确认并手动支付")
                 else:
@@ -890,7 +890,7 @@ class DamaiTicketBot:
                     logger.info("用户已请求停止，退出重试循环")
                     break
 
-                logger.info(f"\\n----- 第 {attempt}/{self.config.max_retry} 次尝试 -----")
+                logger.info(f"----- 第 {attempt}/{self.config.max_retry} 次尝试 -----")
 
                 try:
                     self.go_to_item_page()
@@ -898,7 +898,7 @@ class DamaiTicketBot:
 
                     if result is True:
                         success = True
-                        logger.info("\\n🎉 抢票成功！已进入付款界面，请尽快完成支付。")
+                        logger.info("🎉 抢票成功！已进入付款界面，请尽快完成支付。")
                         logger.info(f"当前页面URL: {self.driver.current_url}")
                         if self.on_success_callback:
                             self.on_success_callback()
