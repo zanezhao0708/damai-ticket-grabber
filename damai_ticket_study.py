@@ -73,6 +73,7 @@
 """
 
 import os
+import json
 import time
 import random
 import logging
@@ -241,22 +242,23 @@ class DamaiTicketBot:
             options.binary_location = chrome_binary
             logger.info(f"使用自定义浏览器: {chrome_binary}")
 
-        # 支持自定义chromedriver路径（避免webdriver-manager联网下载慢）
-        driver_path = os.environ.get("DAMAI_CHROMEDRIVER_PATH")
-        if driver_path and os.path.exists(driver_path):
-            self.driver = webdriver.Chrome(service=Service(driver_path), options=options)
-            return
+        # 支持自定义chromedriver路径（避免联网下载慢）
+        driver_path = self._resolve_chromedriver()
 
-        # 使用webdriver-manager自动管理驱动
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=options)
-        except Exception:
-            # 回退到系统已有驱动
+        if driver_path:
+            logger.info(f"chromedriver已就绪: {driver_path}")
+            self.driver = webdriver.Chrome(service=Service(driver_path), options=options)
+        else:
+            # 兜底：交给Selenium Manager自动处理
+            logger.info("使用Selenium Manager自动管理驱动...")
             self.driver = webdriver.Chrome(options=options)
-        
-        # 执行JS移除webdriver标识
+
+        logger.info("浏览器启动成功")
+        self._apply_stealth()
+        self._finish_driver_setup()
+
+    def _apply_stealth(self):
+        """注入反检测JS（所有驱动路径都必须执行）"""
         self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': '''
                 Object.defineProperty(navigator, 'webdriver', {
@@ -276,11 +278,137 @@ class DamaiTicketBot:
                 });
             '''
         })
-        
+
+    def _resolve_chromedriver(self):
+        """
+        解析chromedriver路径，按优先级：
+        1. 环境变量 DAMAI_CHROMEDRIVER_PATH
+        2. 本地缓存 ./drivers/
+        3. 国内镜像(npmmirror)自动下载（匹配本机Chrome大版本）
+        4. webdriver-manager官方源（限时60秒，国内可能很慢）
+        找不到返回None（由Selenium Manager兜底）
+        """
+        import platform
+        import zipfile
+        import urllib.request
+        import tempfile
+        import shutil
+        import subprocess
+
+        exe = "chromedriver.exe" if platform.system() == "Windows" else "chromedriver"
+
+        # 1. 环境变量指定
+        env_path = os.environ.get("DAMAI_CHROMEDRIVER_PATH")
+        if env_path and os.path.exists(env_path):
+            logger.info(f"[驱动] 使用环境变量指定的chromedriver: {env_path}")
+            return env_path
+
+        # 2. 本地缓存（./drivers/chromedriver）
+        cache_path = os.path.join("drivers", exe)
+        if os.path.exists(cache_path):
+            logger.info(f"[驱动] 使用本地缓存: {cache_path}")
+            return os.path.abspath(cache_path)
+
+        # 3. 国内镜像下载（npmmirror镜像chrome-for-testing，实测国内30MB/s+）
+        try:
+            chrome_ver = self._detect_chrome_version()
+            if chrome_ver:
+                major = chrome_ver.split(".")[0]
+                logger.info(f"[驱动] 检测到Chrome {chrome_ver}，从国内镜像下载匹配驱动...")
+
+                # 拉取镜像上的版本列表，匹配同大版本的最高版本
+                with urllib.request.urlopen(
+                        "https://registry.npmmirror.com/-/binary/chrome-for-testing/",
+                        timeout=15) as resp:
+                    versions = [item["name"].strip("/") for item in json.loads(resp.read().decode())]
+                matched = sorted(
+                    [v for v in versions if v.startswith(major + ".")],
+                    key=lambda v: [int(x) for x in v.split(".")])
+                if not matched:
+                    logger.warning(f"[驱动] 镜像上无 {major}.x 版本驱动")
+                else:
+                    ver = matched[-1]
+                    plat = {
+                        "Windows": "win64" if platform.machine().endswith("64") else "win32",
+                        "Darwin": "mac-arm64" if platform.machine() == "arm64" else "mac-x64",
+                        "Linux": "linux64",
+                    }[platform.system()]
+                    url = (f"https://cdn.npmmirror.com/binaries/chrome-for-testing/"
+                           f"{ver}/{plat}/chromedriver-{plat}.zip")
+                    logger.info(f"[驱动] 下载: {url}")
+                    with urllib.request.urlopen(url, timeout=60) as resp, \
+                            tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                        shutil.copyfileobj(resp, tmp)
+                        tmp_path = tmp.name
+
+                    # 解压chromedriver到 ./drivers/
+                    # 注意精确匹配 /chromedriver，避免误取 LICENSE.chromedriver
+                    os.makedirs("drivers", exist_ok=True)
+                    with zipfile.ZipFile(tmp_path) as zf:
+                        member = next(m for m in zf.namelist()
+                                      if m == exe or m.endswith("/" + exe))
+                        with zf.open(member) as src, open(cache_path, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                    os.unlink(tmp_path)
+                    os.chmod(cache_path, 0o755)
+                    logger.info(f"[驱动] 已下载到本地缓存: {os.path.abspath(cache_path)}（下次秒启）")
+                    return os.path.abspath(cache_path)
+        except Exception as e:
+            logger.warning(f"[驱动] 国内镜像下载失败: {e}")
+
+        # 4. webdriver-manager官方源（限时60秒，国内网络可能超时失败）
+        logger.info("[驱动] 尝试官方源下载（国内网络可能较慢，最多60秒）...")
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self._wdm_install)
+                return future.result(timeout=60)
+        except Exception as e:
+            logger.warning(f"[驱动] 官方源失败: {e}")
+
+        return None
+
+    def _wdm_install(self):
+        """webdriver-manager下载（供线程限时调用）"""
+        from webdriver_manager.chrome import ChromeDriverManager
+        return ChromeDriverManager().install()
+
+    @staticmethod
+    def _detect_chrome_version():
+        """检测本机Chrome版本（跨平台），失败返回None"""
+        import platform
+        import subprocess
+
+        system = platform.system()
+        cmds = []
+        if system == "Windows":
+            cmds = [
+                ["reg", "query", r"HKCU\Software\Google\Chrome\BLBeacon", "/v", "version"],
+                ["reg", "query", r"HKLM\SOFTWARE\Google\Chrome\BLBeacon", "/v", "version"],
+            ]
+        elif system == "Darwin":
+            cmds = [["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--version"]]
+        else:
+            cmds = [["google-chrome", "--version"],
+                    ["google-chrome-stable", "--version"],
+                    ["chromium", "--version"]]
+
+        import re
+        for cmd in cmds:
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
+                m = re.search(r"(\d+\.\d+\.\d+\.\d+)", out)
+                if m:
+                    return m.group(1)
+            except Exception:
+                continue
+        return None
+
+    def _finish_driver_setup(self):
+        """驱动创建后的通用设置"""
         # 设置页面加载超时
         self.driver.set_page_load_timeout(30)
         self.driver.implicitly_wait(5)
-        logger.info("浏览器驱动初始化完成")
     
     def _random_sleep(self, min_sec=0.3, max_sec=1.0):
         """随机等待，模拟人类操作间隔"""
@@ -688,6 +816,7 @@ class DamaiTicketBot:
         
         cookie_file = "damai_cookies.json"
         if not os.path.exists(cookie_file):
+            logger.info("无Cookie记录，需要登录")
             return False
         
         try:
@@ -929,6 +1058,7 @@ class DamaiTicketBot:
         """机器人主入口（根据fast_mode自动选择极速/普通模式）"""
         try:
             # 1. 初始化浏览器
+            logger.info("正在初始化浏览器（首次运行需下载驱动，约10-60秒）...")
             self._init_driver()
 
             # 2. 加载Cookie或登录
