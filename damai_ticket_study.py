@@ -224,13 +224,22 @@ class DamaiTicketBot:
         
         if not self.config.show_browser:
             options.add_argument('--headless')  # 无头模式
-        
+
         options.add_argument('--window-size=1440,900')
-        options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
-        # 极速优化：禁用图片加载（抢票页面无需图片，实测省1-2秒）
-        options.add_argument('--blink-settings=imagesEnabled=false')
-        # 禁用不必要的后台特性
+
+        # ===== 性能优化按模式区分 =====
+        # 无头模式（无人看）：可激进优化
+        # 可见模式（需扫码登录/手动支付）：保留GPU渲染和图片，否则登录页卡顿、二维码不显示
+        if not self.config.show_browser:
+            options.add_argument('--disable-gpu')
+            options.add_argument('--blink-settings=imagesEnabled=false')  # 无头无需图片
+        else:
+            # 可见模式：启用GPU硬件加速，保证登录页/支付页流畅渲染
+            options.add_argument('--enable-gpu-rasterization')
+            options.add_argument('--enable-zero-copy')
+
+        # 禁用不必要的后台特性（两种模式都适用）
         options.add_argument('--disable-background-networking')
         options.add_argument('--disable-sync')
         options.add_argument('--disable-default-apps')
@@ -779,17 +788,9 @@ class DamaiTicketBot:
         这里采用【用户手动登录+保存Cookie】的方案
         """
         logger.info("请在浏览器中手动登录大麦网...")
-        self.driver.get("https://www.damai.cn/")
-        self._random_sleep(2, 3)
-
-        # 尝试点击登录按钮
-        login_selectors = [".login", "[class*='login']", "#login"]
-        for sel in login_selectors:
-            try:
-                self._safe_click(sel, timeout=3)
-                break
-            except:
-                continue
+        # 直接打开轻量登录页（passport.damai.cn），避免加载沉重的首页（视频/轮播）
+        self.driver.get("https://passport.damai.cn/login")
+        self._random_sleep(1, 2)
 
         # 等待用户完成登录
         logger.info("=" * 50)
