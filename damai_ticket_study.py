@@ -72,6 +72,7 @@
 作者: 技术研究示例
 """
 
+import os
 import time
 import random
 import logging
@@ -226,7 +227,26 @@ class DamaiTicketBot:
         options.add_argument('--window-size=1440,900')
         options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
+        # 极速优化：禁用图片加载（抢票页面无需图片，实测省1-2秒）
+        options.add_argument('--blink-settings=imagesEnabled=false')
+        # 禁用不必要的后台特性
+        options.add_argument('--disable-background-networking')
+        options.add_argument('--disable-sync')
+        options.add_argument('--disable-default-apps')
         
+        # 支持自定义浏览器路径（环境变量，用于受限环境/CI测试）
+        # 例: export DAMAI_CHROME_BINARY=/opt/chrome-headless/chrome-headless-shell
+        chrome_binary = os.environ.get("DAMAI_CHROME_BINARY")
+        if chrome_binary and os.path.exists(chrome_binary):
+            options.binary_location = chrome_binary
+            logger.info(f"使用自定义浏览器: {chrome_binary}")
+
+        # 支持自定义chromedriver路径（避免webdriver-manager联网下载慢）
+        driver_path = os.environ.get("DAMAI_CHROMEDRIVER_PATH")
+        if driver_path and os.path.exists(driver_path):
+            self.driver = webdriver.Chrome(service=Service(driver_path), options=options)
+            return
+
         # 使用webdriver-manager自动管理驱动
         try:
             from webdriver_manager.chrome import ChromeDriverManager
@@ -510,32 +530,79 @@ class DamaiTicketBot:
         if not clicked:
             return False
 
-        # 点击成功后处理后续（观演人/订单确认）
-        time.sleep(1)
-        self._select_viewers_if_needed()
+        # ===== 登录墙处理（实测发现：点击购票后未登录会跳 passport.damai.cn） =====
+        # 登录后大麦会带着 buyParam 自动跳回 H5 下单页，所以只需等待登录完成
+        time.sleep(0.8)
+        if self._handle_login_wall():
+            # 登录完成，等待跳转到下单页
+            for _ in range(30):
+                if self.stop_requested:
+                    return False
+                url = self.driver.current_url.lower()
+                if "passport" not in url:
+                    break
+                time.sleep(0.5)
 
-        confirm_js = """
-            const btns = document.querySelectorAll('[class*="confirm"], [class*="submit"], button');
-            for (const b of btns) {
-                const t = (b.textContent || '').trim();
-                if (/提交订单|确认订单|同意以上规则/.test(t)) {
-                    b.click();
-                    return t;
+        # ===== 下单页处理（H5 ultron-buy 或 PC 订单确认页） =====
+        # 等待下单页加载（最多8秒）
+        # 注意：登录页URL的ru参数包含编码后的下单页地址（含buy字样），必须排除passport
+        order_ready = False
+        for _ in range(80):
+            if self.stop_requested:
+                return False
+            try:
+                url = self.driver.current_url.lower()
+                if "passport" in url:
+                    time.sleep(0.25)
+                    continue
+                # H5下单页: m.damai.cn/...h5-ultron-buy... | PC: buy.damai.cn/orderConfirm
+                if any(k in url for k in ["ultron-buy", "orderconfirm", "order", "/buy"]):
+                    order_ready = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        if order_ready:
+            logger.info("已进入下单页，自动提交订单...")
+            time.sleep(1)  # 等待下单页渲染
+            self._select_viewers_if_needed()
+
+            # H5/PC通用的提交订单按钮（按文本匹配，跨端适配）
+            confirm_js = """
+                const btns = document.querySelectorAll(
+                    'button, [class*="confirm"], [class*="submit"], [class*="buybtn"], [class*="buy-btn"], div[role="button"]');
+                // 优先匹配"提交订单/确认"类按钮
+                let fallback = null;
+                for (const b of btns) {
+                    const t = (b.textContent || '').trim();
+                    if (/提交订单|确认订单|同意以上规则并购买|立即支付/.test(t)) {
+                        b.click();
+                        return t;
+                    }
+                    if (/立即购买|确认/.test(t) && !fallback) fallback = b;
                 }
-            }
-            return null;
-        """
-        try:
-            r = self.driver.execute_script(confirm_js)
-            if r:
-                logger.info(f"[极速] 已确认订单: {r}")
-        except Exception:
-            pass
+                if (fallback) { fallback.click(); return (fallback.textContent||'').trim(); }
+                return null;
+            """
+            for i in range(3):  # 最多尝试3次（页面可能渲染慢）
+                try:
+                    r = self.driver.execute_script(confirm_js)
+                    if r:
+                        logger.info(f"[极速] 已点击提交订单: {r}")
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
 
-        # 检测是否到达支付页
+        # ===== 付款页检测（含H5特征，实测验证） =====
         time.sleep(2)
-        url = self.driver.current_url.lower()
-        if any(k in url for k in ["pay", "checkout", "trade", "order"]):
+        try:
+            url = self.driver.current_url.lower()
+        except Exception:
+            url = ""
+        # 排除登录页误判（ru参数含编码后的页面地址）
+        if "passport" not in url and any(k in url for k in ["pay", "checkout", "trade", "ultron-pay"]):
             logger.info("=" * 50)
             logger.info("✅ 极速模式：已进入付款页面！")
             logger.info("=" * 50)
@@ -543,6 +610,36 @@ class DamaiTicketBot:
                 self.on_success_callback()
             return True
         return None
+
+    def _handle_login_wall(self) -> bool:
+        """
+        登录墙检测与等待（实测：未登录点击购票会跳 passport.damai.cn/login）
+        登录后自动跳回下单页。
+        返回True表示遇到了登录墙（并等待完成或超时）
+        """
+        try:
+            url = self.driver.current_url.lower()
+        except Exception:
+            return False
+        if "passport" not in url:
+            return False
+
+        logger.warning("检测到登录墙（passport.damai.cn）")
+        if self.login_callback:
+            self.login_callback()  # GUI/Web提示用户登录
+        else:
+            logger.warning("请在浏览器中完成登录（扫码/验证码），最长等待10分钟...")
+            # 无GUI时轮询等待URL离开passport
+            deadline = time.time() + 600
+            while time.time() < deadline and not self.stop_requested:
+                try:
+                    if "passport" not in self.driver.current_url.lower():
+                        logger.info("检测到登录完成（页面已跳转）")
+                        return True
+                except Exception:
+                    pass
+                time.sleep(1)
+        return True
 
     def login(self):
         """
@@ -869,6 +966,9 @@ class DamaiTicketBot:
                 result = self._fast_wait_and_buy()
                 if result is True:
                     logger.info("🎉 极速抢票成功！已进入付款界面，请尽快完成支付。")
+                    if not self.config.show_browser:
+                        logger.warning("⚠️ 当前为无头模式（浏览器隐藏），无法手动支付！"
+                                       "请改用可见浏览器模式（去掉无头选项）重新运行以完成支付。")
                 elif result is None:
                     logger.info("已到达订单相关页面，请在浏览器中确认并手动支付")
                 else:
