@@ -138,6 +138,12 @@ class DamaiTicketBot:
         self.config = config
         self.driver = None  # Selenium WebDriver实例
         self.base_url = "https://detail.damai.cn/item.htm"
+
+        # GUI集成支持
+        self.stop_requested = False       # 停止信号（GUI点击停止时设为True）
+        self.log_callback = None          # 日志回调函数（GUI用于显示日志）
+        self.login_callback = None        # 登录回调（GUI用于处理手动登录等待）
+        self.on_success_callback = None   # 成功回调（GUI通知用户）
         
         # CSS选择器常量（基于实际DOM分析）
         self.SELECTORS = {
@@ -362,6 +368,11 @@ class DamaiTicketBot:
             else:
                 time.sleep(0.1)  # 最后0.x秒
     
+    def stop(self):
+        """请求停止机器人（由GUI调用）"""
+        self.stop_requested = True
+        logger.info("收到停止信号，正在安全停止...")
+
     def login(self):
         """
         登录大麦网
@@ -374,7 +385,7 @@ class DamaiTicketBot:
         logger.info("请在浏览器中手动登录大麦网...")
         self.driver.get("https://www.damai.cn/")
         self._random_sleep(2, 3)
-        
+
         # 尝试点击登录按钮
         login_selectors = [".login", "[class*='login']", "#login"]
         for sel in login_selectors:
@@ -383,14 +394,18 @@ class DamaiTicketBot:
                 break
             except:
                 continue
-        
-        # 等待用户完成登录（通过检测登录后的标识判断）
+
+        # 等待用户完成登录
         logger.info("=" * 50)
         logger.info("请在浏览器中完成登录操作（扫码/验证码/密码登录）")
-        logger.info("登录完成后，按回车键继续...")
         logger.info("=" * 50)
-        input()  # 等待用户回车确认
-        
+
+        # GUI模式下使用回调等待，命令行模式下使用input
+        if self.login_callback:
+            self.login_callback()  # GUI会阻塞此调用直到用户确认登录完成
+        else:
+            input("登录完成后，按回车键继续...")
+
         # 保存Cookie（下次可免登录）
         import json
         cookies = self.driver.get_cookies()
@@ -647,27 +662,41 @@ class DamaiTicketBot:
         try:
             # 1. 初始化浏览器
             self._init_driver()
-            
+
             # 2. 加载Cookie或登录
             if not self.load_cookies():
                 self.login()
-            
+
+            if self.stop_requested:
+                logger.info("已在登录阶段停止")
+                return
+
             # 3. 等待开票时间
             self._wait_until_start_time()
-            
+
+            if self.stop_requested:
+                logger.info("已在等待阶段停止")
+                return
+
             # 4. 打开目标页面并重试
             success = False
             for attempt in range(1, self.config.max_retry + 1):
+                if self.stop_requested:
+                    logger.info("用户已请求停止，退出重试循环")
+                    break
+
                 logger.info(f"\\n----- 第 {attempt}/{self.config.max_retry} 次尝试 -----")
-                
+
                 try:
                     self.go_to_item_page()
                     result = self.run_ticket_flow()
-                    
+
                     if result is True:
                         success = True
-                        logger.info(f"\\n🎉 抢票成功！已进入付款界面，请尽快完成支付。")
+                        logger.info("\\n🎉 抢票成功！已进入付款界面，请尽快完成支付。")
                         logger.info(f"当前页面URL: {self.driver.current_url}")
+                        if self.on_success_callback:
+                            self.on_success_callback()
                         break
                     elif result is None:
                         # 不确定状态，让用户判断
@@ -675,33 +704,25 @@ class DamaiTicketBot:
                         break
                     else:
                         logger.info("本次尝试未成功，刷新重试...")
-                        
+
                 except Exception as e:
                     logger.error(f"第{attempt}次尝试异常: {e}")
-                
+
                 # 重试间隔（前几次快，后几次慢）
                 interval = self.config.request_interval
                 if attempt > 20:
                     interval *= 2  # 后期减速，防止被封
                 time.sleep(interval)
-            
-            if not success:
+
+            if not success and not self.stop_requested:
                 logger.warning(f"已达最大重试次数 ({self.config.max_retry})，本次抢票结束")
-            
-            # 保持浏览器打开，让用户手动处理后续
-            logger.info("\\n浏览器保持打开状态，按 Ctrl+C 退出...")
-            try:
-                while True:
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                pass
-                
+
         except KeyboardInterrupt:
             logger.info("用户中断")
         except Exception as e:
             logger.exception(f"运行异常: {e}")
         finally:
-            if self.driver:
+            if self.driver and self.stop_requested:
                 logger.info("关闭浏览器...")
                 try:
                     self.driver.quit()
