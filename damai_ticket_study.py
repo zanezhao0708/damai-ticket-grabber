@@ -115,12 +115,20 @@ class TicketConfig:
     
     # 最大重试次数
     max_retry: int = 50
-    
+
     # 请求间隔（秒）- 太快容易被封
     request_interval: float = 0.5
-    
+
     # 是否显示浏览器界面（调试时True，无人值守时False）
     show_browser: bool = True
+
+    # ===== 极速模式（比手速快的关键） =====
+    # 极速模式：开售前预热页面+预选项，开售瞬间JS注入直接点击
+    fast_mode: bool = True
+    # 开售前多少秒开始预热页面（提前打开并选好场次票档）
+    warmup_seconds: int = 60
+    # 极速模式下的轮询间隔（秒），比人手速快得多
+    fast_poll_interval: float = 0.05
 
 
 class DamaiTicketBot:
@@ -196,7 +204,11 @@ class DamaiTicketBot:
             raise
         
         options = Options()
-        
+
+        # ============ 极速加载配置 ============
+        # eager: DOM就绪即返回，不等图片/广告等资源加载完（抢票时快数百毫秒~数秒）
+        options.page_load_strategy = 'eager'
+
         # ============ 反检测配置 ============
         # 禁用自动化标识
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -372,6 +384,165 @@ class DamaiTicketBot:
         """请求停止机器人（由GUI调用）"""
         self.stop_requested = True
         logger.info("收到停止信号，正在安全停止...")
+
+    # ============================================================
+    # 极速模式核心（比手速快的关键实现）
+    # 原理：
+    #   1. 开售前提前打开详情页（页面已渲染、CSS/JS已缓存、连接已建立）
+    #   2. 提前选好日期/场次/票档/数量（开售时页面结构不变，选项依然有效）
+    #   3. 开售瞬间用JS注入 element.click() 直接触发点击事件
+    #      —— 比Selenium原生click()快（跳过鼠标移动合成、可点击性检查）
+    #      —— 比人手速快（无寻找元素/移动鼠标/犹豫的耗时）
+    # ============================================================
+
+    def _js_click(self, element):
+        """用JS直接触发点击事件（最快，跳过Selenium动作链）"""
+        try:
+            self.driver.execute_script("arguments[0].click();", element)
+            return True
+        except Exception as e:
+            logger.debug(f"JS点击失败: {e}")
+            return False
+
+    def _preselect_options(self) -> bool:
+        """
+        预热阶段：提前选好日期/场次/票档/数量
+        开售前这些选项通常已可交互（或选完保留），开售后无需再选
+        """
+        logger.info("[预热] 提前选择日期/场次/票档/数量...")
+        ok = True
+
+        # 日期（如有日历）
+        try:
+            from selenium.webdriver.common.by import By
+            dates = self.driver.find_elements(By.CSS_SELECTOR, self.SELECTORS["date_available"])
+            for d in dates:
+                if d.text.strip():
+                    self._js_click(d)
+                    time.sleep(0.2)
+                    logger.info(f"[预热] 已选日期: {d.text.strip()}")
+                    break
+        except Exception:
+            pass
+
+        # 场次
+        if not self._safe_find_text_click(self.SELECTORS["session_list"], self.config.session_keyword):
+            logger.warning("[预热] 场次预选失败")
+            ok = False
+
+        # 票档
+        if not self._safe_find_text_click(".perform__order__box", self.config.ticket_keyword):
+            logger.warning("[预热] 票档预选失败")
+            ok = False
+
+        # 数量
+        self._set_quantity(self.config.quantity)
+        logger.info("[预热] 预选完成，等待开售...")
+        return ok
+
+    def _fast_wait_and_buy(self):
+        """
+        极速模式：高频轮询购票按钮，一旦可点立即JS点击
+        这是"比正常人快"的核心——50ms级轮询+瞬时JS点击
+        """
+        from selenium.webdriver.common.by import By
+        import datetime
+
+        # 等待开售
+        if self.config.start_time:
+            target = datetime.datetime.strptime(self.config.start_time, "%Y-%m-%d %H:%M:%S")
+            while not self.stop_requested:
+                remaining = (target - datetime.datetime.now()).total_seconds()
+                if remaining <= 0:
+                    break
+                if remaining > 10:
+                    logger.info(f"距开售 {remaining:.0f} 秒")
+                    time.sleep(min(remaining - 5, 10))
+                else:
+                    time.sleep(0.05)  # 最后10秒高精度等待
+
+        if self.stop_requested:
+            return False
+
+        logger.info("开售！开始极速点击购票...")
+
+        buy_js = """
+            // 在页面上下文中直接查找并点击购票按钮（毫秒级）
+            const candidates = [
+                ...document.querySelectorAll('.buy-link'),           // "不，立即购票"
+                ...document.querySelectorAll('[class*="buy"]'),
+                ...document.querySelectorAll('[class*="submit"]'),
+                ...document.querySelectorAll('[class*="confirm"]')
+            ];
+            for (const el of candidates) {
+                const t = (el.textContent || '').trim();
+                if (/立即购票|立即预订|提交|确定/.test(t)) {
+                    el.click();
+                    return t;
+                }
+            }
+            return null;
+        """
+
+        clicked = False
+        attempt = 0
+        while not clicked and not self.stop_requested and attempt < self.config.max_retry:
+            attempt += 1
+            try:
+                result = self.driver.execute_script(buy_js)
+                if result:
+                    logger.info(f"[极速] 已点击: {result}")
+                    clicked = True
+                    break
+                # 按钮还没出现（未开售），高频轮询
+                time.sleep(self.config.fast_poll_interval)
+                # 每隔一段时间刷新页面（防止页面状态过期）
+                if attempt % 200 == 0:
+                    logger.info("[极速] 按钮未出现，刷新页面重试...")
+                    self.driver.refresh()
+                    time.sleep(1)
+                    # 刷新后需要重新预选
+                    self._preselect_options()
+            except Exception as e:
+                logger.debug(f"[极速] 轮询异常: {e}")
+                time.sleep(self.config.fast_poll_interval)
+
+        if not clicked:
+            return False
+
+        # 点击成功后处理后续（观演人/订单确认）
+        time.sleep(1)
+        self._select_viewers_if_needed()
+
+        confirm_js = """
+            const btns = document.querySelectorAll('[class*="confirm"], [class*="submit"], button');
+            for (const b of btns) {
+                const t = (b.textContent || '').trim();
+                if (/提交订单|确认订单|同意以上规则/.test(t)) {
+                    b.click();
+                    return t;
+                }
+            }
+            return null;
+        """
+        try:
+            r = self.driver.execute_script(confirm_js)
+            if r:
+                logger.info(f"[极速] 已确认订单: {r}")
+        except Exception:
+            pass
+
+        # 检测是否到达支付页
+        time.sleep(2)
+        url = self.driver.current_url.lower()
+        if any(k in url for k in ["pay", "checkout", "trade", "order"]):
+            logger.info("=" * 50)
+            logger.info("✅ 极速模式：已进入付款页面！")
+            logger.info("=" * 50)
+            if self.on_success_callback:
+                self.on_success_callback()
+            return True
+        return None
 
     def login(self):
         """
@@ -658,7 +829,7 @@ class DamaiTicketBot:
             logger.warning(f"观演人选择异常（可能需要手动处理）: {e}")
     
     def run(self):
-        """机器人主入口"""
+        """机器人主入口（根据fast_mode自动选择极速/普通模式）"""
         try:
             # 1. 初始化浏览器
             self._init_driver()
@@ -671,6 +842,40 @@ class DamaiTicketBot:
                 logger.info("已在登录阶段停止")
                 return
 
+            # ===== 极速模式：预热 + 瞬时点击 =====
+            if self.config.fast_mode:
+                logger.info(f"⚡ 极速模式启动（开售前{self.config.warmup_seconds}秒预热页面）")
+                import datetime
+                # 计算预热时间（开售前N秒）
+                if self.config.start_time:
+                    target = datetime.datetime.strptime(self.config.start_time, "%Y-%m-%d %H:%M:%S")
+                    warmup_at = target - datetime.timedelta(seconds=self.config.warmup_seconds)
+                    while not self.stop_requested:
+                        now = datetime.datetime.now()
+                        if now >= warmup_at:
+                            break
+                        remaining = (warmup_at - now).total_seconds()
+                        logger.info(f"等待预热时间，还有 {remaining:.0f} 秒")
+                        time.sleep(min(remaining, 10))
+
+                if self.stop_requested:
+                    return
+
+                # 预热：提前打开页面并预选项
+                self.go_to_item_page()
+                self._preselect_options()
+
+                # 极速等待开售并点击
+                result = self._fast_wait_and_buy()
+                if result is True:
+                    logger.info("\\n🎉 极速抢票成功！已进入付款界面，请尽快完成支付。")
+                elif result is None:
+                    logger.info("已到达订单相关页面，请在浏览器中确认并手动支付")
+                else:
+                    logger.warning("极速模式未能进入付款页")
+                return
+
+            # ===== 普通模式（逐次重试完整流程） =====
             # 3. 等待开票时间
             self._wait_until_start_time()
 
