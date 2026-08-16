@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 运行时生成物
+cookies/
+*.cookies
+damai_config.json
+.deps_installed
+
+# 打包
+*.zip

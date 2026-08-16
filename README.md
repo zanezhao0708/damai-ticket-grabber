@@ -18,6 +18,13 @@
 
 ## 🚀 快速开始（Web 版）
 
+### 方式一：一键脚本（推荐）
+
+- **Windows**：双击 `start.bat`（自动装依赖 → 启动 → 自动打开浏览器）
+- **Mac/Linux**：终端执行 `./start.sh`
+
+### 方式二：手动命令
+
 ```bash
 # 1. 安装依赖
 pip install -r requirements.txt
@@ -60,6 +67,8 @@ python damai_gui.py
 ## 📁 项目结构
 
 ```
+├── start.bat              # Windows 一键启动（装依赖+启动+开浏览器）
+├── start.sh               # Mac/Linux 一键启动
 ├── app.py                 # Web 服务入口（Flask，端口 8787）
 ├── templates/index.html   # Web 前端界面（单页）
 ├── damai_gui.py           # 桌面 GUI 入口（tkinter，备选）
